@@ -1,0 +1,142 @@
+#include <MsTimer2.h>
+#include <TM1637Display.h>
+
+// --- TM1637 setup ---
+#define CLK 6   // TM1637 CLK pin
+#define DIO 7   // TM1637 DIO pin
+TM1637Display display(CLK, DIO);
+
+// Doppler sensor setup
+int pbIn = 0;        // Interrupt pin (digital 2)
+int ledOut = 13;
+volatile int count = 0;
+volatile int state = LOW;
+
+// Doppler constants
+const float radarFrequency = 10.525e9;       // 10.525 GHz
+const float c = 3e8;                         // speed of light
+const float wavelength = c / radarFrequency; // ~0.0285 m
+
+// Ultrasonic sensor pins
+const int trigPin = 9;
+const int echoPin = 10;
+
+long duration;
+float distance;
+
+// Range LEDs
+const int ledNear = 3;   // Close range LED (Red)
+const int ledMid  = 4;   // Medium range LED (Yellow)
+const int ledFar  = 5;   // Far range LED (Green)
+
+void setup() {
+  Serial.begin(9600);
+
+  // Doppler setup
+  pinMode(ledOut, OUTPUT);
+  attachInterrupt(pbIn, stateChange, FALLING);
+  MsTimer2::set(1000, process); // every 1s
+  MsTimer2::start();
+
+  // Ultrasonic setup
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+
+  // LEDs setup
+  pinMode(ledNear, OUTPUT);
+  pinMode(ledMid, OUTPUT);
+  pinMode(ledFar, OUTPUT);
+
+  // TM1637 setup
+  display.setBrightness(0x0f); // max brightness
+  display.showNumberDec(0);    // clear display
+}
+
+void loop() {
+  // measure distance every loop
+  distance = getDistance();
+
+  // Light LEDs based on distance
+  updateLEDs(distance);
+
+  if (state == HIGH) {
+    // only print when motion detected
+    Serial.print("Object detected! Distance: ");
+    Serial.print(distance, 2);
+    Serial.println(" cm");
+    delay(2000);
+    state = LOW;
+    digitalWrite(ledOut, state);
+  }
+}
+
+// Interrupt handler for Doppler
+void stateChange() {
+  count++;
+}
+
+// Timer callback
+void process() {
+  if (count > 1) {
+    state = HIGH;
+    digitalWrite(ledOut, state);
+
+    float fd = count; // Doppler frequency (Hz)
+    float velocity = (fd * wavelength) / 2.0; // m/s
+
+    Serial.print("Speed: ");
+    Serial.print(velocity, 2);
+    Serial.println(" m/s");
+
+    // --- Display speed on TM1637 ---
+    // Multiply by 100 to show with 2 decimals (example: 1.23 m/s -> 123)
+    int displaySpeed = (int)(velocity * 100);  
+    display.showNumberDec(displaySpeed, false, 4, 0);
+
+    count = 0;
+  } else {
+    count = 0;
+    Serial.println("No motion");
+    display.showNumberDec(0, false, 4, 0); // show 0 if no motion
+  }
+}
+
+// Function for ultrasonic distance
+float getDistance() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  duration = pulseIn(echoPin, HIGH);
+
+  // distance in cm
+  float d = duration * 0.034 / 2; 
+  return d;
+}
+
+// Update LEDs based on distance
+void updateLEDs(float d) {
+  if (d <= 50 && d > 0) { // Close range
+    digitalWrite(ledNear, HIGH);
+    digitalWrite(ledMid, LOW);
+    digitalWrite(ledFar, LOW);
+  } 
+  else if (d > 50 && d <= 200) { // Medium range
+    digitalWrite(ledNear, LOW);
+    digitalWrite(ledMid, HIGH);
+    digitalWrite(ledFar, LOW);
+  } 
+  else if (d > 200) { // Far range
+    digitalWrite(ledNear, LOW);
+    digitalWrite(ledMid, LOW);
+    digitalWrite(ledFar, HIGH);
+  } 
+  else { // No valid reading
+    digitalWrite(ledNear, LOW);
+    digitalWrite(ledMid, LOW);
+    digitalWrite(ledFar, LOW);
+  }
+}
