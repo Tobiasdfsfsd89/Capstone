@@ -1,0 +1,142 @@
+import cv2
+import numpy as np
+import time
+import serial
+import threading
+from ultralytics import YOLO
+
+# --- Load YOLOv8 model ---
+model = YOLO("best.pt")
+
+# --- Camera setup ---
+cap = cv2.VideoCapture(0)
+ws, hs = 1280, 720
+cap.set(3, ws)
+cap.set(4, hs)
+
+# -----------------------------------------------------------
+#   THREADED SERIAL READER (non-blocking)
+# -----------------------------------------------------------
+
+distance_m = 0.0  # shared variable updated by thread
+
+def serial_reader():
+    global distance_m
+    try:
+        ser = serial.Serial('COM3', 115200, timeout=0.01)
+        print("Serial connection established with ESP32 LiDAR module.")
+    except Exception as e:
+        print(f"Warning: LiDAR serial not connected ({e}). Displaying 0 m.")
+        return
+
+    while True:
+        try:
+            line = ser.readline().decode().strip()
+            if line.startswith("D"):
+                parts = line.split(" ")
+                if len(parts) > 1:
+                    cm = float(parts[1])
+                    distance_m = cm / 100.0
+        except:
+            pass
+
+# start serial thread
+t = threading.Thread(target=serial_reader, daemon=True)
+t.start()
+
+# -----------------------------------------------------------
+#   SPEED + HOLDING BUFFER
+# -----------------------------------------------------------
+
+prev_distance = None
+prev_time = time.time()
+speed_m_s = 0.0
+
+# Hold display values for longer
+last_display_distance = 0.0
+last_display_speed = 0.0
+last_update_time = time.time()
+hold_time = 0.5  # seconds to keep values visible
+
+print("Drone Detection Active. Press 'q' to quit.")
+
+# -----------------------------------------------------------
+#   MAIN LOOP
+# -----------------------------------------------------------
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    current_distance = distance_m
+    current_time = time.time()
+
+    # --- SPEED CALC ---
+    if prev_distance is not None:
+        delta_dist = current_distance - prev_distance
+        delta_time = current_time - prev_time
+
+        if delta_time > 0:
+            speed_m_s = delta_dist / delta_time
+
+            # clamp negative speeds
+            if speed_m_s < 0:
+                speed_m_s = abs(speed_m_s)
+
+            # update display buffer
+            last_display_distance = current_distance
+            last_display_speed = speed_m_s
+            last_update_time = current_time
+
+    prev_distance = current_distance
+    prev_time = current_time
+
+    # ----------------------------------
+    #   HOLD DISPLAY VALUES FOR LONGER
+    # ----------------------------------
+
+    if current_time - last_update_time <= hold_time:
+        display_distance = last_display_distance
+        display_speed = last_display_speed
+    else:
+        display_distance = 0.0
+        display_speed = 0.0
+
+    # --- YOLO detection ---
+    results = model.predict(source=frame, conf=0.35, verbose=False)
+    detections = results[0].boxes
+
+    if len(detections) > 0:
+        best = max(detections, key=lambda b: float(b.conf[0]))
+        x1, y1, x2, y2 = map(int, best.xyxy[0])
+        conf = float(best.conf[0])
+        cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(frame, (cx, cy), 5, (0, 0, 255), -1)
+        cv2.putText(frame, f"Drone {conf:.2f}", (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    else:
+        cv2.putText(frame, "No Drone Detected", (50, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+    # --- Display overlays ---
+    cv2.line(frame, (ws // 2, 0), (ws // 2, hs), (255, 255, 255), 1)
+    cv2.line(frame, (0, hs // 2), (ws, hs // 2), (255, 255, 255), 1)
+
+    cv2.putText(frame, f"Distance: {display_distance:.2f} m",
+                (50, hs - 90),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
+
+    cv2.putText(frame, f"Speed: {display_speed:.2f} m/s ({display_speed*3.6:.2f} km/h)",
+                (50, hs - 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 200, 255), 2)
+
+    cv2.imshow("AI Drone Detection (YOLOv8 + LiDAR + Speed + Alerts)", frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
